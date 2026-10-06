@@ -7,7 +7,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -31,9 +31,29 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: OpenEmby-TV-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Rename APK
+        run: |
+          mkdir -p release
+          cp app/build/outputs/apk/debug/*.apk release/OpenEmby-TV-debug.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: OpenEmby TV Build ${{ github.run_number }}
+          body: |
+            OpenEmby TV 自动构建版本
+
+            Commit: ${{ github.sha }}
+
+            此版本由 GitHub Actions 自动编译。
+          files: |
+            release/OpenEmby-TV-debug.apk
+          generate_release_notes: true
