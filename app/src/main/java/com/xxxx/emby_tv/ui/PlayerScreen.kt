@@ -1163,7 +1163,7 @@ fun PlayerScreen(
                     position = position,
                     selectedSubtitleIndex = selectedSubtitleIndex,
                     selectedAudioIndex = selectedAudioIndex,
-                    playbackRate = playbackSpeed
+                    playbackRate = currentPlaybackSpeed
                 )
                 hasReportedPlaying = true
             } catch (e: Exception) {
@@ -1430,7 +1430,7 @@ if (p.playbackSpeed != currentPlaybackSpeed) {
                                 position = position,
                                 selectedSubtitleIndex = selectedSubtitleIndex,
                                 selectedAudioIndex = selectedAudioIndex,
-                                playbackRate = playbackSpeed
+                                playbackRate = currentPlaybackSpeed
                             )
 
                         }
@@ -1442,7 +1442,7 @@ if (p.playbackSpeed != currentPlaybackSpeed) {
                             position = position,
                             selectedSubtitleIndex = selectedSubtitleIndex,
                             selectedAudioIndex = selectedAudioIndex,
-                            playbackRate = playbackSpeed
+                            playbackRate = currentPlaybackSpeed
                         )
 
                     }
@@ -1542,7 +1542,7 @@ if (p.playbackSpeed != currentPlaybackSpeed) {
                 position = position,
                 selectedSubtitleIndex = selectedSubtitleIndex,
                 selectedAudioIndex = selectedAudioIndex,
-                playbackRate = playbackSpeed
+                playbackRate = currentPlaybackSpeed
             )
         }
     }
