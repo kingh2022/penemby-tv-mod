@@ -556,11 +556,11 @@ fun PlayerScreen(
         )
 
         val newPlayer = buildPlayer().apply {
-            repeatMode = repeatMode
-            shuffleModeEnabled = shuffleEnabled
-            trackSelectionParameters = trackParameters
+            this.repeatMode = repeatMode
+            this.shuffleModeEnabled = shuffleEnabled
+            this.trackSelectionParameters = trackParameters
             setMediaItem(mediaItem, resumePositionMs)
-            setPlaybackParameters(playbackParameters.withSpeed(targetSpeed))
+            setPlaybackParameters(this.playbackParameters.withSpeed(targetSpeed))
             prepare()
             playWhenReady = shouldPlay
         }
