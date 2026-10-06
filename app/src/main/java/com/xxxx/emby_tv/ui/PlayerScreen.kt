@@ -1381,16 +1381,17 @@ fun PlayerScreen(
                 } else if (state == Player.STATE_READY) {
                     isBuffering = false
 
-                    // 某些设备/解码器在进入 READY 后会重置 PlaybackParameters，
-                    // 因此再次同步当前倍速，确保菜单选择真正作用于实际播放器。
-                    if (p.playbackSpeed != playbackSpeed) {
-                        p.setPlaybackSpeed(playbackSpeed)
-                        Log.d(
-                            "Player",
-                            "Re-applied playback speed at READY: ${playbackSpeed}x"
-                        )
-                    }
+// 某些设备/解码器在进入 READY 后会重置 PlaybackParameters，
+// 因此再次同步当前倍速，确保菜单选择真正作用于实际播放器。
+val currentPlaybackSpeed = preferencesManager.playbackSpeed
 
+if (p.playbackSpeed != currentPlaybackSpeed) {
+    p.setPlaybackSpeed(currentPlaybackSpeed)
+    Log.d(
+        "Player",
+        "Re-applied playback speed at READY: ${currentPlaybackSpeed}x"
+    )
+}
                     // 在STATE_READY时获取准确时长
                     val rawDuration = p.duration
                     if (rawDuration > 0) {
