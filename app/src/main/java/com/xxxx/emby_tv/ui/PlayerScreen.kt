@@ -518,6 +518,61 @@ fun PlayerScreen(
 
     var player by remember { mutableStateOf(buildPlayer()) }
 
+    /**
+     * Android TV 倍速兼容：部分 TV 音频 HAL / Media3 Renderer 组合下，
+     * 对已经 prepare 的 ExoPlayer 直接 setPlaybackSpeed() 只会更新参数，
+     * 实际播放链仍可能保持 1.0x。
+     *
+     * 倍速发生变化时重建播放器，并完整恢复：
+     * - 当前 MediaItem
+     * - 当前播放位置
+     * - 音频/字幕 TrackSelectionParameters
+     * - playWhenReady / repeat / shuffle
+     *
+     * 这样新的 Renderer/AudioSink 会在目标倍速状态下重新初始化。
+     */
+    fun rebuildPlayerForSpeed(targetSpeed: Float) {
+        val oldPlayer = player
+        val mediaItem = oldPlayer.currentMediaItem
+
+        // 还没有真正加载媒体时无需重建；等 videoUrl effect 初始化播放器即可。
+        if (mediaItem == null) {
+            oldPlayer.setPlaybackParameters(
+                oldPlayer.playbackParameters.withSpeed(targetSpeed)
+            )
+            Log.d("Player", "Speed changed before media loaded: ${targetSpeed}x")
+            return
+        }
+
+        val resumePositionMs = oldPlayer.currentPosition.coerceAtLeast(0L)
+        val trackParameters = oldPlayer.trackSelectionParameters
+        val shouldPlay = oldPlayer.playWhenReady
+        val repeatMode = oldPlayer.repeatMode
+        val shuffleEnabled = oldPlayer.shuffleModeEnabled
+
+        Log.d(
+            "Player",
+            "Rebuilding ExoPlayer for speed ${targetSpeed}x at ${resumePositionMs}ms"
+        )
+
+        val newPlayer = buildPlayer().apply {
+            repeatMode = repeatMode
+            shuffleModeEnabled = shuffleEnabled
+            trackSelectionParameters = trackParameters
+            setMediaItem(mediaItem, resumePositionMs)
+            setPlaybackParameters(playbackParameters.withSpeed(targetSpeed))
+            prepare()
+            playWhenReady = shouldPlay
+        }
+
+        player = newPlayer
+
+        Log.d(
+            "Player",
+            "New ExoPlayer created: speed=${newPlayer.playbackParameters.speed}x, position=${resumePositionMs}ms"
+        )
+    }
+
     // ===== 外部播放器统一拉起 + 进度回传 =====
     // pkg 语义：null=使用偏好设置的默认播放器；""=系统选择器；非空=指定包名
     // Zidoo 设备上走官方控制 API（直链推送 + 断点续播 + 进度轮询回传）
@@ -723,10 +778,9 @@ fun PlayerScreen(
         }
     }
 
-    // 应用倍速（player 重建后也需重新应用）
-    LaunchedEffect(player, playbackSpeed) {
-        player.setPlaybackSpeed(playbackSpeed)
-    }
+    // 倍速变化由 onPlaybackSpeedChange 直接触发播放器重建。
+    // 这里不再用 LaunchedEffect 反复 setPlaybackSpeed，避免 TV Renderer 已初始化后
+    // 只更新 PlaybackParameters、实际播放链却仍保持 1.0x 的情况。
 
     // 字幕时间偏移：接管字幕渲染（内置 subtitleView 已隐藏，由 overlay SubtitleView 显示）
     DisposableEffect(player) {
@@ -1075,9 +1129,15 @@ fun PlayerScreen(
 
             player.prepare()
 
-            // prepare() 后再次强制应用倍速，避免播放器/媒体源初始化把速度恢复到 1.0x。
-            player.setPlaybackSpeed(currentPlaybackSpeed)
-            Log.d("Player", "Applied playback speed after prepare: ${currentPlaybackSpeed}x")
+            // 初次加载媒体时设置目标倍速。后续用户改变倍速会通过
+            // rebuildPlayerForSpeed() 重建完整播放链。
+            player.setPlaybackParameters(
+                player.playbackParameters.withSpeed(currentPlaybackSpeed)
+            )
+            Log.d(
+                "Player",
+                "Applied playback speed after prepare: ${player.playbackParameters.speed}x"
+            )
 
             player.playWhenReady = true
         }
@@ -1382,14 +1442,15 @@ fun PlayerScreen(
                 } else if (state == Player.STATE_READY) {
                     isBuffering = false
 
-// 某些设备/解码器在进入 READY 后会重置 PlaybackParameters，
-// 因此再次同步当前倍速，确保菜单选择真正作用于实际播放器。
-
+// 某些设备/解码器在进入 READY 后可能重置 PlaybackParameters。
+// 如果确实被重置，只重新设置参数；正常的倍速切换已经通过播放器重建完成。
 if (p.playbackParameters.speed != currentPlaybackSpeed) {
-    p.setPlaybackSpeed(currentPlaybackSpeed)
+    p.setPlaybackParameters(
+        p.playbackParameters.withSpeed(currentPlaybackSpeed)
+    )
     Log.d(
         "Player",
-        "Re-applied playback speed at READY: ${currentPlaybackSpeed}x"
+        "Re-applied playback speed at READY: ${p.playbackParameters.speed}x"
     )
 }
                     // 在STATE_READY时获取准确时长
@@ -1923,9 +1984,12 @@ if (p.playbackParameters.speed != currentPlaybackSpeed) {
                         preferencesManager.resetBufferDefaults()
                     },
                     playbackSpeed = playbackSpeed,
-                    onPlaybackSpeedChange = {
-                        playbackSpeed = it
-                        preferencesManager.playbackSpeed = it
+                    onPlaybackSpeedChange = { newSpeed ->
+                        if (newSpeed != playbackSpeed) {
+                            playbackSpeed = newSpeed
+                            preferencesManager.playbackSpeed = newSpeed
+                            rebuildPlayerForSpeed(newSpeed)
+                        }
                     },
                     subtitleBottomPadding = subtitleBottomPadding,
                     onSubtitleBottomPaddingChange = {
