@@ -1077,7 +1077,7 @@ fun PlayerScreen(
 
             // prepare() 后再次强制应用倍速，避免播放器/媒体源初始化把速度恢复到 1.0x。
             player.setPlaybackSpeed(playbackSpeed)
-            Log.d("Player", "Applied playback speed after prepare: ${playbackSpeed}x")
+            Log.d("Player", "Applied playback speed after prepare: ${currentPlaybackSpeed}x")
 
             player.playWhenReady = true
         }
