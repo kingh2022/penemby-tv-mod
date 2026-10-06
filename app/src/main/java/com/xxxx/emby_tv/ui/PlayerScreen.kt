@@ -1384,7 +1384,6 @@ fun PlayerScreen(
 
 // 某些设备/解码器在进入 READY 后会重置 PlaybackParameters，
 // 因此再次同步当前倍速，确保菜单选择真正作用于实际播放器。
-val currentPlaybackSpeed = preferencesManager.playbackSpeed
 
 if (p.playbackSpeed != currentPlaybackSpeed) {
     p.setPlaybackSpeed(currentPlaybackSpeed)
