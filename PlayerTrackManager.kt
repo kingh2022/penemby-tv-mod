@@ -2,7 +2,6 @@ package com.xxxx.emby_tv.ui.player
 
 import android.util.Log
 import androidx.media3.common.C
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
@@ -30,6 +29,7 @@ object PlayerTrackManager {
         selectedIndex: Int,
         currentTracks: Tracks?
     ) {
+        // 关闭字幕
         if (selectedIndex == -1) {
             player.trackSelectionParameters = player.trackSelectionParameters
                 .buildUpon()
@@ -49,10 +49,11 @@ object PlayerTrackManager {
         val targetIndex = targetTrack.index?.toString().orEmpty()
         val targetLabel = targetTrack.displayTitle?.trim().orEmpty()
         val targetLanguage = targetTrack.language?.trim()?.lowercase().orEmpty()
-        val targetCodec = targetTrack.codec?.trim()?.lowercase().orEmpty()
+        val targetOrdinalIndex = subtitleTracks.indexOf(targetTrack)
 
         val groups = currentTracks?.groups ?: player.currentTracks.groups
         val trackGroups = groups.filter { it.type == C.TRACK_TYPE_TEXT }
+
         if (trackGroups.isEmpty()) {
             Log.w(TAG, "No Media3 text track groups available yet")
             return
@@ -62,117 +63,96 @@ object PlayerTrackManager {
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
 
-        data class Candidate(
-            val group: Tracks.Group,
-            val index: Int,
-            val score: Int,
-            val reason: String
-        )
+        var matchedGroup: Tracks.Group? = null
+        var matchedIndex = -1
+        var matchedBy = ""
 
-        fun normalize(value: String?): String =
-            value.orEmpty().trim().lowercase()
-                .replace("_", "-")
-                .replace(Regex("\\s+"), " ")
-
-        fun codecMatches(format: androidx.media3.common.Format): Boolean {
-            val mime = format.sampleMimeType?.lowercase().orEmpty()
-            return when {
-                targetCodec.contains("ass") || targetCodec.contains("ssa") ->
-                    mime == MimeTypes.TEXT_SSA
-                targetCodec.contains("vtt") || targetCodec.contains("webvtt") ->
-                    mime == MimeTypes.TEXT_VTT
-                targetCodec.contains("srt") || targetCodec.contains("subrip") ->
-                    mime == MimeTypes.APPLICATION_SUBRIP
-                targetCodec.contains("pgs") || targetCodec.contains("hdmv_pgs") ->
-                    mime == MimeTypes.APPLICATION_PGS
-                targetCodec.contains("dvb") || targetCodec.contains("dvbsub") ->
-                    mime == MimeTypes.APPLICATION_DVBSUBS
-                else -> false
+        fun tryMatch(predicate: (androidx.media3.common.Format) -> Boolean, reason: String): Boolean {
+            for (group in trackGroups) {
+                for (i in 0 until group.length) {
+                    if (predicate(group.getTrackFormat(i))) {
+                        matchedGroup = group
+                        matchedIndex = i
+                        matchedBy = reason
+                        return true
+                    }
+                }
             }
+            return false
         }
 
-        val candidates = mutableListOf<Candidate>()
-        for (group in trackGroups) {
-            for (i in 0 until group.length) {
-                val format = group.getTrackFormat(i)
+        // 1. 外置字幕配置：SubtitleConfigBuilder 使用 Emby index 作为 Media3 Format.id。
+        // 2. 内嵌字幕：不同容器/解码器生成的 id 格式可能是 "3"、"text:3" 等。
+        val matched = tryMatch(
+            predicate = { format ->
                 val id = format.id?.toString().orEmpty()
-                val label = format.label?.trim().orEmpty()
-                val language = format.language?.trim()?.lowercase().orEmpty()
-                var score = 0
-                val reasons = mutableListOf<String>()
+                id == targetIndex ||
+                    id.endsWith(":$targetIndex") ||
+                    id.endsWith("/$targetIndex")
+            },
+            reason = "id"
+        ) ||
+            tryMatch(
+                predicate = { format ->
+                    val label = format.label?.trim().orEmpty()
+                    label == "$targetLabel [$targetIndex]"
+                },
+                reason = "unique-label"
+            ) ||
+            tryMatch(
+                predicate = { format ->
+                    val label = format.label?.trim().orEmpty()
+                    val language = format.language?.trim()?.lowercase().orEmpty()
+                    targetLabel.isNotEmpty() &&
+                        label == targetLabel &&
+                        (targetLanguage.isEmpty() || language == targetLanguage)
+                },
+                reason = "label+language"
+            ) ||
+            tryMatch(
+                predicate = { format ->
+                    targetLanguage.isNotEmpty() &&
+                        format.language?.trim()?.lowercase() == targetLanguage
+                },
+                reason = "language"
+            )
 
-                if (id == targetIndex || id.endsWith(":$targetIndex") || id.endsWith("/$targetIndex")) {
-                    score += 1000
-                    reasons += "id"
-                }
-                if (label == "$targetLabel [$targetIndex]") {
-                    score += 900
-                    reasons += "unique-label"
-                }
-                if (targetLabel.isNotEmpty() && normalize(label) == normalize(targetLabel)) {
-                    score += 300
-                    reasons += "label"
-                }
-                if (targetLanguage.isNotEmpty() && language == targetLanguage) {
-                    score += 200
-                    reasons += "language"
-                }
-                if (codecMatches(format)) {
-                    score += 100
-                    reasons += "codec"
-                }
-                if (format.selectionFlags and C.SELECTION_FLAG_DEFAULT != 0 &&
-                    targetTrack.isDefault == true
-                ) {
-                    score += 40
-                    reasons += "default"
-                }
-                if (targetTrack.isForced == true &&
-                    format.selectionFlags and C.SELECTION_FLAG_FORCED != 0
-                ) {
-                    score += 40
-                    reasons += "forced"
-                }
-
-                if (score > 0) {
-                    candidates += Candidate(group, i, score, reasons.joinToString("+"))
+        // 最后才使用顺序匹配。这里不再要求 isExternal/supportsExternalStream，
+        // 因为内嵌字幕同样需要通过 TrackSelectionOverride 切换。
+        if (!matched && targetOrdinalIndex >= 0) {
+            var counter = 0
+            outer@ for (group in trackGroups) {
+                for (i in 0 until group.length) {
+                    if (counter == targetOrdinalIndex) {
+                        matchedGroup = group
+                        matchedIndex = i
+                        matchedBy = "ordinal"
+                        break@outer
+                    }
+                    counter++
                 }
             }
         }
 
-        // 关键修复：绝不再把 Emby subtitle index 直接当成 Media3 全部字幕轨道的 ordinal。
-        // 一个容器里可能同时存在内嵌字幕、外置字幕和多个 TrackGroup，这种顺序并不稳定。
-        val best = candidates.maxByOrNull { it.score }
-
-        if (best != null) {
+        if (matchedGroup != null && matchedIndex >= 0) {
             builder.addOverride(
-                TrackSelectionOverride(best.group.mediaTrackGroup, best.index)
+                TrackSelectionOverride(matchedGroup!!.mediaTrackGroup, matchedIndex)
             )
             player.trackSelectionParameters = builder.build()
 
-            val format = best.group.getTrackFormat(best.index)
+            val format = matchedGroup!!.getTrackFormat(matchedIndex)
             Log.d(
                 TAG,
-                "Subtitle selected: EmbyIndex=$targetIndex, label=${format.label}, " +
-                    "id=${format.id}, language=${format.language}, mime=${format.sampleMimeType}, " +
-                    "matchedBy=${best.reason}, score=${best.score}"
+                "Subtitle selected: EmbyIndex=$targetIndex, " +
+                    "label=${format.label}, id=${format.id}, language=${format.language}, " +
+                    "matchedBy=$matchedBy"
             )
         } else {
             Log.w(
                 TAG,
                 "Unable to match subtitle: EmbyIndex=$targetIndex, " +
-                    "Label=$targetLabel, Language=$targetLanguage, Codec=$targetCodec"
+                    "OrdinalIndex=$targetOrdinalIndex, Label=$targetLabel, Language=$targetLanguage"
             )
-            for (group in trackGroups) {
-                for (i in 0 until group.length) {
-                    val f = group.getTrackFormat(i)
-                    Log.d(
-                        TAG,
-                        "Available subtitle: group=${group.mediaTrackGroup.id}, track=$i, " +
-                            "id=${f.id}, label=${f.label}, language=${f.language}, mime=${f.sampleMimeType}"
-                    )
-                }
-            }
         }
     }
 

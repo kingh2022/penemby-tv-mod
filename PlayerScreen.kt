@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.viewinterop.AndroidView
@@ -47,6 +48,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.audio.ChannelMixingAudioProcessor
 import androidx.media3.common.audio.ChannelMixingMatrix
+import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.text.CueGroup
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioCapabilities
@@ -308,15 +310,12 @@ fun PlayerScreen(
                     .setExceedRendererCapabilitiesIfNecessary(true)
                     .build()
 
-                // 2. 检测硬件隧道能力仅用于界面/日志展示。
-                // 不实际开启 tunneling：Android TV 的硬件隧道会让部分设备忽略
-                // ExoPlayer 的非 1.0x PlaybackParameters，表现为“菜单显示倍速但实际仍 1x”。
-                // Media3 官方也明确提示 tunneling 存在大量设备特定限制，因此这里优先保证倍速可靠。
+                // 2. 动态判断隧道模式：仅在电视支持且非音频软解时开启
                 isTunnelingSafe = checkActualHardwareTunnelingSupport()
 
                 setParameters(
                     baseParameters.buildUpon()
-                        .setTunnelingEnabled(false)
+                        .setTunnelingEnabled(isTunnelingSafe)
                         .build()
                 )
             }
@@ -378,11 +377,8 @@ fun PlayerScreen(
                         // PCM 写入异常，系统会把倍速异步重置回 1.0（表现为倍速失效）。
                         // 强制走 Sonic 软件变速，不依赖 HAL。
                         .setEnableAudioTrackPlaybackParams(false)
-                        // 这里只注入声道降混处理器。
-                        // Media3 1.9 的 DefaultAudioProcessorChain 会自动在用户处理器之后
-                        // 添加唯一的 SonicAudioProcessor；这里再手动添加一个 Sonic 会形成两级
-                        // 变速处理链，容易造成速度/时长计算异常。
-                        .setAudioProcessors(arrayOf(channelMixer))
+                        // 保留 Sonic（倍速支持）并前置声道降混处理器
+                        .setAudioProcessors(arrayOf(channelMixer, SonicAudioProcessor()))
                         .build()
                 } catch (e: Exception) {
                     // 兜底：任何矩阵/构建异常都回落到原生 sink，绝不影响进入播放页
@@ -523,191 +519,26 @@ fun PlayerScreen(
 
     var player by remember { mutableStateOf(buildPlayer()) }
 
-    // ===== 外部播放器统一拉起 + 进度回传 =====
-    // pkg 语义：null=使用偏好设置的默认播放器；""=系统选择器；非空=指定包名
-    // Zidoo 设备上走官方控制 API（直链推送 + 断点续播 + 进度轮询回传）
-    var zidooMonitorActive by remember { mutableStateOf(false) }
-
-    fun launchZidooPlayer(url: String): Boolean {
-        if (zidooMonitorActive) return true
-        zidooMonitorActive = true
-        try {
-            player.pause()
-            player.stop()
-        } catch (_: Exception) {
-        }
-        scope.launch(Dispatchers.IO) {
-            var lastPosition = position
-            try {
-                // 上报拉起时进度
-                playerViewModel.reportProgress(
-                    mediaId = mediaId, media = media, position = position,
-                    selectedSubtitleIndex = selectedSubtitleIndex,
-                    selectedAudioIndex = selectedAudioIndex, isPaused = true
-                )
-                if (!ZidooHelper.openFile(url)) {
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(
-                            context, context.getString(R.string.external_player_launch_failed),
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                    return@launch
-                }
-                // 等待播放器就绪后跳到续播位置
-                if (position > 0) {
-                    kotlinx.coroutines.delay(3000)
-                    ZidooHelper.seekTo(position)
-                }
-                // 轮询 Zidoo 播放状态，实时回传进度；播放会话结束（用户退出播放器）时上报停止
-                while (kotlinx.coroutines.currentCoroutineContext().isActive) {
-                    kotlinx.coroutines.delay(5000)
-                    val st = ZidooHelper.getPlayStatus() ?: break
-                    if (st.positionMs > 0) {
-                        lastPosition = st.positionMs
-                        playerViewModel.reportProgress(
-                            mediaId = mediaId, media = media, position = st.positionMs,
-                            selectedSubtitleIndex = selectedSubtitleIndex,
-                            selectedAudioIndex = selectedAudioIndex
-                        )
-                    }
-                    if (st.durationMs > 0 && st.positionMs >= st.durationMs - 5000) {
-                        break // 播放完成
-                    }
-                }
-            } catch (e: Exception) {
-                ErrorHandler.logError("PlayerScreen", "Zidoo 播放监控异常", e)
-            } finally {
-                zidooMonitorActive = false
-                if (lastPosition > 0) {
-                    playerViewModel.reportStopped(
-                        mediaId = mediaId, media = media, position = lastPosition,
-                        selectedSubtitleIndex = selectedSubtitleIndex,
-                        selectedAudioIndex = selectedAudioIndex
-                    )
-                }
-            }
-        }
-        return true
-    }
-
-    // Intent 方式拉起外部播放器的结果回传（VLC/MX Player 退出时回传播放位置）
-    val externalPlayerLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        // VLC/MX Player 等退出时会回传播放位置，同步到服务器保证"继续观看"进度正确
-        val returnedPos = ExternalPlayerHelper.extractReturnedPosition(result.data)
-        if (returnedPos != null && returnedPos > 0) {
-            position = returnedPos
-            playerViewModel.reportProgress(
-                mediaId = mediaId,
-                media = media,
-                position = returnedPos,
-                selectedSubtitleIndex = selectedSubtitleIndex,
-                selectedAudioIndex = selectedAudioIndex
-            )
-        }
-    }
-
-    fun launchViaIntent(url: String, targetPkg: String?): Boolean {
-        val intent = ExternalPlayerHelper.buildLaunchIntent(url, targetPkg, position)
-        // 指定包名在本机不可用时回退系统选择器
-        if (!targetPkg.isNullOrBlank()) {
-            try {
-                if (intent.resolveActivity(context.packageManager) == null) intent.setPackage(null)
-            } catch (_: Exception) {
-                intent.setPackage(null)
-            }
-        }
-        return try {
-            // 暂停内置播放并上报当前进度，交由外部播放器接管（经 launcher 拉起以接收退出位置回传）
-            player.pause()
-            playerViewModel.reportProgress(
-                mediaId = mediaId,
-                media = media,
-                position = position,
-                selectedSubtitleIndex = selectedSubtitleIndex,
-                selectedAudioIndex = selectedAudioIndex,
-                isPaused = true
-            )
-            externalPlayerLauncher.launch(intent)
-            true
-        } catch (e: Exception) {
-            ErrorHandler.logError("PlayerScreen", "拉起外部播放器失败", e)
-            scope.launch {
-                android.widget.Toast.makeText(
-                    context, context.getString(R.string.external_player_launch_failed),
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-            }
-            false
-        }
-    }
-
     /**
-     * 外部播放器统一入口：
-     * Zidoo 设备走官方控制 API（DV 双层直通 + 进度完整回传），其余走 Intent 方式
+     * Android TV 倍速切换：优先直接修改当前 ExoPlayer 的 PlaybackParameters。
+     * 不重建播放器、不重新 prepare、不改变当前播放位置，从而避免切换倍速时影片暂停/黑屏。
      */
-    fun launchExternalPlayer(pkg: String?): Boolean {
-        val url = ExternalPlayerHelper.buildPlayUrl(
-            media, mediaId, currentMediaSourceId, serverUrl, apiKey
-        )
-        if (url == null) {
-            scope.launch {
-                android.widget.Toast.makeText(
-                    context, context.getString(R.string.external_player_launch_failed),
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-            }
-            return false
-        }
-        if (ZidooHelper.isZidooDevice() && ZidooHelper.isApiAvailable()) {
-            return launchZidooPlayer(url)
-        }
-        return launchViaIntent(url, pkg ?: preferencesManager.preferredExternalPlayerPackage)
-    }
+    fun applyPlaybackSpeed(targetSpeed: Float) {
+        val p = player
+        if (p.playbackParameters.speed != targetSpeed) {
+            val wasPlaying = p.isPlaying
+            p.setPlaybackSpeed(targetSpeed)
 
-    // ===== 音频故障自动恢复（全程自动，无用户交互）=====
-    // 0: 正常；1: 已用立体声安全模式重建过播放器；2: 已降级为无声播放
-    var audioRecoveryStage by remember { mutableIntStateOf(0) }
-    // 当前播放器实例是否出现过音频输出错误（播放器重建时自动重置）
-    var currentPlayerAudioError by remember { mutableStateOf(false) }
+            // 某些 TV 解码器可能在参数更新后短暂丢失播放状态，
+            // 只有原本正在播放时才恢复播放，避免人为暂停状态被改变。
+            if (wasPlaying && !p.isPlaying && p.playbackState == Player.STATE_READY) {
+                p.play()
+            }
 
-    fun handleAudioSinkFailure() {
-        when (audioRecoveryStage) {
-            0 -> {
-                audioRecoveryStage = 1
-                audioSafeModeChannels = 2
-                Log.w(AUDIO_RECOVERY_TAG, "音频输出初始化失败，自动切换立体声安全模式并重建播放器")
-                val oldPlayer = player
-                val resumePositionMs = oldPlayer.currentPosition
-                val currentMediaItem = oldPlayer.currentMediaItem
-                val trackParameters = oldPlayer.trackSelectionParameters
-                oldPlayer.stop()
-                val newPlayer = buildPlayer()
-                if (currentMediaItem != null) {
-                    newPlayer.setMediaItem(currentMediaItem, resumePositionMs)
-                }
-                newPlayer.trackSelectionParameters = trackParameters
-                newPlayer.prepare()
-                newPlayer.playWhenReady = true
-                player = newPlayer // Compose 自动释放旧实例、重新绑定监听与画面
-            }
-            1 -> {
-                audioRecoveryStage = 2
-                Log.w(AUDIO_RECOVERY_TAG, "立体声安全模式仍无音频，自动转为无声播放（视频继续）")
-                val p = player
-                p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-                    .build()
-                scope.launch {
-                    android.widget.Toast.makeText(
-                        context,
-                        context.getString(R.string.audio_output_degraded),
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
+            Log.d(
+                "Player",
+                "Applied playback speed without rebuilding player: ${targetSpeed}x, position=${p.currentPosition}ms"
+            )
         }
     }
 
@@ -728,17 +559,9 @@ fun PlayerScreen(
         }
     }
 
-    // 应用倍速（player 重建、prepare、READY 后都会重新同步）。
-    // 不使用 AudioTrack/HAL 的变速路径，播放器统一由 Media3 的 PlaybackParameters + Sonic 处理。
-    LaunchedEffect(player, playbackSpeed) {
-        val speed = playbackSpeed.coerceIn(0.5f, 4.0f)
-        if (player.playbackParameters.speed != speed) {
-            player.setPlaybackParameters(
-                player.playbackParameters.withSpeed(speed)
-            )
-        }
-        Log.d("Player", "Playback speed applied: ${speed}x, actual=${player.playbackParameters.speed}x")
-    }
+    // 倍速变化由 onPlaybackSpeedChange 直接应用到当前播放器。
+    // 不重建 ExoPlayer，避免切换倍速时暂停、重新缓冲或跳转。
+
 
     // 字幕时间偏移：接管字幕渲染（内置 subtitleView 已隐藏，由 overlay SubtitleView 显示）
     DisposableEffect(player) {
@@ -1087,11 +910,15 @@ fun PlayerScreen(
 
             player.prepare()
 
-            // prepare() 后再次强制应用倍速，避免播放器/媒体源初始化把速度恢复到 1.0x。
+            // 初次加载媒体时设置目标倍速。后续用户改变倍速会通过
+            // rebuildPlayerForSpeed() 重建完整播放链。
             player.setPlaybackParameters(
-                player.playbackParameters.withSpeed(currentPlaybackSpeed.coerceIn(0.5f, 4.0f))
+                player.playbackParameters.withSpeed(currentPlaybackSpeed)
             )
-            Log.d("Player", "Applied playback speed after prepare: ${currentPlaybackSpeed}x")
+            Log.d(
+                "Player",
+                "Applied playback speed after prepare: ${player.playbackParameters.speed}x"
+            )
 
             player.playWhenReady = true
         }
@@ -1390,26 +1217,21 @@ fun PlayerScreen(
                 }
             }
 
-            override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
-                Log.d("Player", "Playback parameters changed: speed=${playbackParameters.speed}x")
-            }
-
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_BUFFERING) {
                     isBuffering = true
                 } else if (state == Player.STATE_READY) {
                     isBuffering = false
 
-// 某些设备/解码器在进入 READY 后会重置 PlaybackParameters，
-// 因此再次同步当前倍速，确保菜单选择真正作用于实际播放器。
-
+// 某些设备/解码器在进入 READY 后可能重置 PlaybackParameters。
+// 如果确实被重置，只重新设置参数；正常的倍速切换已经通过播放器重建完成。
 if (p.playbackParameters.speed != currentPlaybackSpeed) {
     p.setPlaybackParameters(
-        p.playbackParameters.withSpeed(currentPlaybackSpeed.coerceIn(0.5f, 4.0f))
+        p.playbackParameters.withSpeed(currentPlaybackSpeed)
     )
     Log.d(
         "Player",
-        "Re-applied playback speed at READY: requested=${currentPlaybackSpeed}x, actual=${p.playbackParameters.speed}x"
+        "Re-applied playback speed at READY: ${p.playbackParameters.speed}x"
     )
 }
                     // 在STATE_READY时获取准确时长
@@ -1569,6 +1391,23 @@ if (p.playbackParameters.speed != currentPlaybackSpeed) {
 
     // 监听按键显示菜单
     val focusRequester = remember { FocusRequester() }
+
+    // Android TV 返回键：优先关闭播放器菜单/信息层，否则明确回到上一层导航。
+    // 不让 Activity 直接 finish，从而避免播放页返回时跳到 Android 桌面。
+    BackHandler {
+        when {
+            showMenu -> {
+                showMenu = false
+            }
+            isShowInfo -> {
+                isShowInfo = false
+            }
+            else -> {
+                Log.d("Player", "Back pressed: leaving PlayerScreen")
+                onExit()
+            }
+        }
+    }
 
     // UI 结构 - 最外层纯黑背景
     Box(
@@ -1943,9 +1782,12 @@ if (p.playbackParameters.speed != currentPlaybackSpeed) {
                         preferencesManager.resetBufferDefaults()
                     },
                     playbackSpeed = playbackSpeed,
-                    onPlaybackSpeedChange = {
-                        playbackSpeed = it
-                        preferencesManager.playbackSpeed = it
+                    onPlaybackSpeedChange = { newSpeed ->
+                        if (newSpeed != playbackSpeed) {
+                            playbackSpeed = newSpeed
+                            preferencesManager.playbackSpeed = newSpeed
+                            applyPlaybackSpeed(newSpeed)
+                        }
                     },
                     subtitleBottomPadding = subtitleBottomPadding,
                     onSubtitleBottomPaddingChange = {

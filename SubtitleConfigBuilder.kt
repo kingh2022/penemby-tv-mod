@@ -51,24 +51,18 @@ object SubtitleConfigBuilder {
 //            Log.d(TAG, "Track[$index]: Codec=$codec, IsExternal=${track.isExternal}, SupportsExternal=${track.supportsExternalStream}, Loadable=$isLoadableSubtitle")
 
             if (isLoadableSubtitle) {
-                // 不再把所有未知字幕都强制请求为 SRT。
-                // SRT/VTT/ASS 等文本字幕可以由 Emby 转成兼容格式；PGS/DVB 等图像字幕
-                // 则必须保留对应格式，否则 Media3 根本拿不到可渲染的 Bitmap Cue。
+                // 对于 ASS/SSA/SUBRIP 请求 SRT 格式，让 Emby 转码
                 val requestFormat = when {
-                    codec.contains("ass") || codec.contains("ssa") -> "srt"
-                    codec.contains("subrip") || codec.contains("srt") -> "srt"
-                    codec.contains("vtt") || codec.contains("webvtt") -> "vtt"
-                    codec.contains("pgs") || codec.contains("hdmv_pgs") -> "pgssub"
-                    codec.contains("dvb") || codec.contains("dvbsub") -> "dvbsub"
+                    codec.contains("ass") || codec.contains("ssa") || codec.contains("subrip") -> "srt"
+                    codec.contains("vtt") -> "vtt"
                     else -> "srt"
                 }
 
                 val subUrl = "${serverUrl}/emby/Videos/$mediaId/$mediaSourceId/Subtitles/$index/Stream.$requestFormat?api_key=$apiKey"
 
-                val mimeType = when {
-                    requestFormat == "vtt" -> MimeTypes.TEXT_VTT
-                    requestFormat == "pgssub" -> MimeTypes.APPLICATION_PGS
-                    requestFormat == "dvbsub" -> MimeTypes.APPLICATION_DVBSUBS
+                // 根据请求格式确定 MIME 类型
+                val mimeType = when (requestFormat) {
+                    "vtt" -> MimeTypes.TEXT_VTT
                     else -> MimeTypes.APPLICATION_SUBRIP
                 }
 

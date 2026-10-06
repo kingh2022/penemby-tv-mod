@@ -330,6 +330,10 @@ fun EmbyTvApp() {
                                 val nextPos = newPosition * 10000
                                 navController.popBackStack()
                                 navController.navigate("player/$nextId?position=$nextPos")
+                            },
+                            onExit = {
+                                // 播放页明确返回上一层，避免 Activity 被 finish 后直接回到 Android TV 桌面。
+                                navController.popBackStack()
                             }
                         )
                     }
