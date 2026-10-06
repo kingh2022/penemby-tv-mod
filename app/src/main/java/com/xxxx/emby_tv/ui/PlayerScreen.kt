@@ -1321,6 +1321,7 @@ fun PlayerScreen(
     // 播放器监听
     DisposableEffect(player) {
         val p = player
+        val currentPlaybackSpeed = preferencesManager.playbackSpeed
         currentPlayerAudioError = false
         p.addAnalyticsListener(object : AnalyticsListener {
 
