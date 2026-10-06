@@ -256,7 +256,8 @@ fun PlayerScreen(
 
     // 倍速设置 - 从 PreferencesManager 加载保存的值
     var playbackSpeed by remember(preferencesManager.playbackSpeed) { mutableFloatStateOf(preferencesManager.playbackSpeed) }
-
+    // 当前播放速度的统一值，供整个 PlayerScreen 使用
+    val currentPlaybackSpeed = playbackSpeed
     // 字幕位置设置 - 从 PreferencesManager 加载保存的值
     var subtitleBottomPadding by remember(preferencesManager.subtitleBottomPadding) { mutableFloatStateOf(preferencesManager.subtitleBottomPadding) }
 
@@ -1321,7 +1322,6 @@ fun PlayerScreen(
     // 播放器监听
     DisposableEffect(player) {
         val p = player
-        val currentPlaybackSpeed = preferencesManager.playbackSpeed
         currentPlayerAudioError = false
         p.addAnalyticsListener(object : AnalyticsListener {
 
